@@ -29,14 +29,14 @@ This repository provides an AWS CloudFormation template that deploys a sample so
 
 ## Triggering the Pipeline
 
-After the CloudFormation stack creation is completed, you can find the URL value from the key AmazonS3BucketForGlueDataBrewDataInput.
+After the CloudFormation stack creation is completed, you can find the URL value from the key "AmazonS3BucketForGlueDataBrewDataInput".
 ![alt text](images/CloudFormationOutput.png)
 Click on the URL value to navigate to the S3 bucket created for Glue DataBrew data input.
 
 To trigger the provisioned data pipeline and test its functionality, you may upload a data file that contains PII data or you may use the sample synthetic data [here](https://github.com/aws-samples/automating-pii-data-detection-and-data-masking-tasks-with-aws-glue-databrew-and-aws-step-functions/raw/main/data/pii-sample-dataset.csv).
 ![alt text](images/UploadData.png)
 
-Navigate to Step Functions [console](https://ap-southeast-1.console.aws.amazon.com/states/), further click into the state machine with prefix "StateMachinePIITask", you will see there is an execution at "Running" state.
+Navigate to Step Functions [console](https://console.aws.amazon.com/states/), further click into the state machine with prefix "StateMachinePIITask", you will see there is an execution at "Running" state.
 ![alt text](images/StepFunctionsStateMachine.png)
 
 Click into the execution, you can see the progress of the data pipeline through the Graph Inspector.
@@ -51,14 +51,14 @@ To inspect the output of the data masking step, go to the ["Jobs" section of the
 ![alt text](images/GlueDataBrewRecipeJob.png)
 
 Click on "1 output" of the succeeded recipe job to further see the S3 bucket where the data output is located at.
-![alt text](images/GlueDataBrewRecipeJobOutput.png)
 
 Click on the value of “Destination” to navigate to the S3 bucket.
+![alt text](images/GlueDataBrewRecipeJobOutput.png)
 
 Inside the data output S3 bucket, there is a .json file which is the data profile result you have just reviewed in JSON format. There is also a folder path that contains the data output of the PII data masking task. Click into the folder path.
-![alt text](images/QueryData.png)
 
 Select the .csv file which is the output of the Glue DataBrew recipe job. Select “Actions”, then click “Query with S3 Select”.
+![alt text](images/QueryData.png)
 
 Scroll through the page until you find the “Run SQL query” button. Click on “Run SQL query”.
 ![alt text](images/QueryDataResults.png)
