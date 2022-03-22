@@ -2,7 +2,7 @@
 
 ## Introduction
 
-This repository provides an AWS CloudFormation template that deploys a sample solution demonstrating how to leverage [AWS Glue DataBrew](https://aws.amazon.com/glue/features/databrew/) to automatically detect PII data, and mask the respective PII data with its native transformation functions. The whole workflow can be orchestrated by AWS Step Functions to form an event-driven PII data processing pipeline whenever there is new data landed to Amazon S3.
+This repository provides an [AWS CloudFormation](https://aws.amazon.com/cloudformation/) template that deploys a sample solution demonstrating how to leverage [AWS Glue DataBrew](https://aws.amazon.com/glue/features/databrew/) to automatically detect PII data, and mask the respective PII data with its native transformation functions. The whole workflow can be orchestrated by [AWS Step Functions](https://aws.amazon.com/step-functions/) to form an event-driven PII data processing pipeline whenever there is new data landed to [Amazon S3](https://aws.amazon.com/s3/).
 
 ## Solution Overview
 
@@ -76,5 +76,5 @@ See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more inform
 
 ## License
 
-This library is licensed under the MIT-0 License. See the LICENSE file.
+This library is licensed under the MIT-0 License. See the [LICENSE](LICENSE) file.
 
