@@ -1,0 +1,414 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Sample solution to automatically detect PII columns in data uploaded to S3 and mask the columns by AWS GlueDatabrew.'
+
+Parameters:
+  PIIMatchingThresholdValue:
+    Type: Number
+    Default: 80
+    MaxValue: 100
+    MinValue: 0
+    Description: Enter a number between 0-100 in terms of percentage to decide by how much of sampled records being labelled as PII values inside a column so that Glue DataBrew will further conduct automatic data masking on those columns.
+  HashingSecretValue:
+    Type: String
+    Description: Enter a secret string that will be base64 encoded to use for hashing the PII data.
+
+Resources:
+  # Step functions state machine
+  StateMachinePIITask:
+    Type: 'AWS::StepFunctions::StateMachine'
+    Properties:
+      DefinitionString:
+        !Sub
+          - |-
+            {
+              "Comment": "Automatically detect PII columns of data files loaded into S3 and reproduce the data files with PII columns masked.",
+              "StartAt": "Create Glue DataBrew Dataset",
+              "States": {
+                "Create Glue DataBrew Dataset": {
+                  "Type": "Task",
+                  "Parameters": {
+                    "Input": {
+                      "S3InputDefinition": {
+                        "Bucket.$": "$.bucket.name",
+                        "Key.$": "$.object.key"
+                      }
+                    },
+                    "Name.$": "$.object.key"
+                  },
+                  "Resource": "arn:aws:states:::aws-sdk:databrew:createDataset",
+                  "Next": "Create Glue DataBrew Profile Job",
+                  "InputPath": "$.detail"
+                },
+                "Create Glue DataBrew Profile Job": {
+                  "Type": "Task",
+                  "Parameters": {
+                    "DatasetName.$": "$.Name",
+                    "Name.$": "States.Format('{}-PII-Detection-Job',$.Name)",
+                    "OutputLocation": {
+                      "Bucket": "${GlueDataBrewOutputBucketName}"
+                    },
+                    "Configuration": {
+                      "EntityDetectorConfiguration": {
+                        "AllowedStatistics": [
+                          {
+                            "Statistics": [
+                              "AGGREGATED_GROUP",
+                              "TOP_VALUES_GROUP",
+                              "CONTAINING_NUMERIC_VALUES_GROUP"
+                            ]
+                          }
+                        ],
+                        "EntityTypes": [
+                          "USA_ALL",
+                          "PERSON_NAME"
+                        ]
+                      }
+                    },
+                    "RoleArn": "${RoleGlueDataBrewPIITask.Arn}"
+                  },
+                  "Resource": "arn:aws:states:::aws-sdk:databrew:createProfileJob",
+                  "Next": "Start Glue DataBrew Profile Job"
+                },
+                "Start Glue DataBrew Profile Job": {
+                  "Type": "Task",
+                  "Resource": "arn:aws:states:::databrew:startJobRun.sync",
+                  "Parameters": {
+                    "Name.$": "$.Name"
+                  },
+                  "Next": "Process Profile Result with Lambda Function",
+                  "ResultSelector": {
+                    "DatasetName.$": "$.DatasetName",
+                    "Outputs.$": "$.Outputs"
+                  }
+                },
+                "Process Profile Result with Lambda Function": {
+                  "Type": "Task",
+                  "Resource": "arn:aws:states:::lambda:invoke",
+                  "Parameters": {
+                    "FunctionName": "${FunctionGlueDataBrewProfileReader.Arn}",
+                    "Payload.$": "$"
+                  },
+                  "Retry": [
+                    {
+                      "ErrorEquals": [
+                        "Lambda.ServiceException",
+                        "Lambda.AWSLambdaException",
+                        "Lambda.SdkClientException"
+                      ],
+                      "IntervalSeconds": 2,
+                      "MaxAttempts": 6,
+                      "BackoffRate": 2
+                    }
+                  ],
+                  "Next": "Validate if the Dataset Contains PII Columns",
+                  "ResultPath": "$.LambdaTaskResult",
+                  "ResultSelector": {
+                    "pii-columns.$": "$.Payload"
+                  }
+                },
+                "Validate if the Dataset Contains PII Columns": {
+                  "Type": "Choice",
+                  "Choices": [
+                    {
+                      "Variable": "$.LambdaTaskResult.pii-columns",
+                      "StringEquals": "No PII columns found.",
+                      "Next": "No PII Data is Found"
+                    }
+                  ],
+                  "Default": "Create Glue DataBrew PII Data Masking Recipe"
+                },
+                "No PII Data is Found": {
+                  "Type": "Succeed"
+                },
+                "Create Glue DataBrew PII Data Masking Recipe": {
+                  "Type": "Task",
+                  "Parameters": {
+                    "Name.$": "States.Format('{}-PII-Masking-Recipe',$.DatasetName)",
+                    "Steps": [
+                      {
+                        "Action": {
+                          "Operation": "CRYPTOGRAPHIC_HASH",
+                          "Parameters": {
+                            "secretId": "${GlueDataBrewPIITaskSecretArn}",
+                            "sourceColumns.$": "$.LambdaTaskResult.pii-columns"
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  "Resource": "arn:aws:states:::aws-sdk:databrew:createRecipe",
+                  "Next": "Create Glue DataBrew Project",
+                  "ResultPath": "$.Recipe"
+                },
+                "Create Glue DataBrew Project": {
+                  "Type": "Task",
+                  "Next": "Create Glue DataBrew Recipe Job",
+                  "Parameters": {
+                    "DatasetName.$": "$.DatasetName",
+                    "Name.$": "States.Format('{}-PII-Project',$.DatasetName)",
+                    "RecipeName.$": "$.Recipe.Name",
+                    "RoleArn": "${RoleGlueDataBrewPIITask.Arn}"
+                  },
+                  "Resource": "arn:aws:states:::aws-sdk:databrew:createProject",
+                  "ResultPath": "$.Project"
+                },
+                "Create Glue DataBrew Recipe Job": {
+                  "Type": "Task",
+                  "Parameters": {
+                    "ProjectName.$": "$.Project.Name",
+                    "Outputs": [
+                      {
+                        "Location": {
+                          "Bucket": "${GlueDataBrewOutputBucketName}"
+                        }
+                      }
+                    ],
+                    "Name.$": "States.Format('{}-PII-Masking-Job',$.DatasetName)",
+                    "RoleArn": "${RoleGlueDataBrewPIITask.Arn}"
+                  },
+                  "Resource": "arn:aws:states:::aws-sdk:databrew:createRecipeJob",
+                  "Next": "Start Glue DataBrew Recipe Job"
+                },
+                "Start Glue DataBrew Recipe Job": {
+                  "Type": "Task",
+                  "Resource": "arn:aws:states:::databrew:startJobRun.sync",
+                  "Parameters": {
+                    "Name.$": "$.Name"
+                  },
+                  "Next": "Successfully Mask PII Data"
+                },
+                "Successfully Mask PII Data": {
+                  "Type": "Succeed"
+                }
+              }
+            }
+          - {GlueDataBrewOutputBucketName: !Ref 'BucketGlueDataBrewPIIDataOutput', GlueDataBrewPIITaskSecretArn: !Ref 'SecretGlueDataBrewPIITask'}
+      RoleArn: !GetAtt 'RoleStepFunctionsPIITask.Arn'
+
+  # Lambda functions
+  FunctionGlueDataBrewProfileReader:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Environment:
+        Variables:
+          threshold: !Ref PIIMatchingThresholdValue
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+
+          def lambda_handler(event, context):
+
+            s3Bucket = event["Outputs"][0]["Location"]["Bucket"]
+            s3ObjKey = event["Outputs"][0]["Location"]["Key"]
+
+            s3 =boto3.client('s3')
+            glueDataBrewProfileResultFile = s3.get_object(Bucket=s3Bucket, Key=s3ObjKey)
+            glueDataBrewProfileResult = json.loads(glueDataBrewProfileResultFile['Body'].read().decode('utf-8'))
+            columnsProfiled = glueDataBrewProfileResult["columns"]
+
+            PIIColumnsList = []
+            for item in columnsProfiled:
+              if "entityTypes" in item["entity"]:
+                if (item["entity"]["rowsCount"]/glueDataBrewProfileResult["sampleSize"]) >= int(os.environ.get("threshold"))/100:
+                  PIIColumnsList.append(item["name"])
+
+            if PIIColumnsList == []:
+              return 'No PII columns found.'
+            else:
+              return PIIColumnsList
+      Handler: 'index.lambda_handler'
+      Role: !GetAtt 'RoleLambdaGlueDataBrewProfileReader.Arn'
+      Runtime: 'python3.9'
+
+  # S3 Buckets
+  BucketGlueDataBrewPIIDataInput:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName:
+        !Sub
+          - 'gluedatabrew-pii-data-input-${RandomGUID}'
+          - {RandomGUID: !Select [0, !Split ["-", !Select [2, !Split ["/", !Ref AWS::StackId]]]]}
+      NotificationConfiguration:
+        EventBridgeConfiguration:
+          EventBridgeEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+  BucketGlueDataBrewPIIDataOutput:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName:
+        !Sub
+          - 'gluedatabrew-pii-data-output-${RandomGUID}'
+          - {RandomGUID: !Select [0, !Split ["-", !Select [2, !Split ["/", !Ref AWS::StackId]]]]}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  # EventBridge Rule
+  EventBridgeRuleNewDataArrival:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      Description: Listen to object creation and update events inside the S3 bucket for Glue DataBrew data input.
+      EventBusName: default
+      State: ENABLED
+      EventPattern:
+        source:
+          - aws.s3
+        detail-type:
+          - Object Created
+        detail:
+          bucket:
+            name:
+            - !Ref 'BucketGlueDataBrewPIIDataInput'
+      Targets:
+        - Arn: !GetAtt 'StateMachinePIITask.Arn'
+          Id: NewDataArrivalForPIITask
+          RoleArn: !GetAtt 'RoleEventBridgePIITask.Arn'
+
+  # Secrets Manager Secret
+  SecretGlueDataBrewPIITask:
+    Type: 'AWS::SecretsManager::Secret'
+    Properties:
+      Name: GlueDataBrewPIITaskSecret
+      Description: "Dynamically generate a secret for Glue DataBrew."
+      SecretString:
+        Fn::Base64:
+          !Ref HashingSecretValue
+
+  # IAM roles
+  RoleStepFunctionsPIITask:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: 'states.amazonaws.com'
+          Action: 'sts:AssumeRole'
+      Policies:
+      - PolicyName: InvokeFunctionGlueDataBrewProfileReader
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action: 'lambda:InvokeFunction'
+            Resource:
+            - !GetAtt 'FunctionGlueDataBrewProfileReader.Arn'
+      ManagedPolicyArns:
+      - 'arn:aws:iam::aws:policy/AwsGlueDataBrewFullAccessPolicy'
+  RoleGlueDataBrewPIITask:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: 'databrew.amazonaws.com'
+          Action: 'sts:AssumeRole'
+      Policies:
+      - PolicyName: DataBrewS3BucketsAccess
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+            - s3:GetObject
+            - s3:PutObject
+            - s3:DeleteObject
+            - s3:ListBucket
+            - s3:PutObjectAcl
+            Resource:
+            - !GetAtt 'BucketGlueDataBrewPIIDataInput.Arn'
+            - !Join
+                - ''
+                - - !GetAtt 'BucketGlueDataBrewPIIDataInput.Arn'
+                  - /*   
+            - !GetAtt 'BucketGlueDataBrewPIIDataOutput.Arn'
+            - !Join
+                - ''
+                - - !GetAtt 'BucketGlueDataBrewPIIDataOutput.Arn'
+                  - /*
+      - PolicyName: GetGlueDataBrewPIITaskSecret
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+            - 'secretsmanager:GetResourcePolicy'
+            - 'secretsmanager:GetSecretValue'
+            - 'secretsmanager:DescribeSecret'
+            - 'secretsmanager:ListSecretVersionIds'
+            Resource:
+            - !Ref 'SecretGlueDataBrewPIITask'
+          - Effect: Allow
+            Action: 'secretsmanager:ListSecrets'
+            Resource: '*'
+      ManagedPolicyArns:
+      - 'arn:aws:iam::aws:policy/service-role/AWSGlueDataBrewServiceRole'
+  RoleLambdaGlueDataBrewProfileReader:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: 'lambda.amazonaws.com'
+          Action: 'sts:AssumeRole'
+      Policies:
+      - PolicyName: DataBrewS3BucketsAccess
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+            - 's3:GetObject'
+            Resource:
+            - !Join
+                - ''
+                - - !GetAtt 'BucketGlueDataBrewPIIDataOutput.Arn'
+                  - /*    
+      ManagedPolicyArns:
+      - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+  RoleEventBridgePIITask:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: 'events.amazonaws.com'
+          Action: 'sts:AssumeRole'
+      Policies:
+      - PolicyName: StepFunctionsStateMachine-PII-Task-Trigger
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+              - 'states:StartExecution'
+            Resource:
+              - !GetAtt 'StateMachinePIITask.Arn'
+
+Outputs:
+  AmazonS3BucketForGlueDataBrewDataInput:
+    Value: !Sub https://s3.console.aws.amazon.com/s3/buckets/${BucketGlueDataBrewPIIDataInput}?region=${AWS::Region}
+  AWSStepFunctionsStateMachine:
+    Value: !Sub https://console.aws.amazon.com/states/home?region=${AWS::Region}#/statemachines/view/${StateMachinePIITask}
