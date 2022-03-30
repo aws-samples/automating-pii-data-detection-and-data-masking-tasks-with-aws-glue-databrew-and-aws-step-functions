@@ -68,7 +68,8 @@ The query results sampled 5 rows from the data output of Glue DataBrew recipe jo
 ## Cleaning Up
 
 To avoid incurring future charges, delete the resources.
-Navigate to the CloudFormation console and delete the stack named “automate-pii-handling-data-pipeline” (or the stack named with your customized value during the CloudFormation stack creation step).
+
+Navigate to the [CloudFormation console](https://console.aws.amazon.com/cloudformation/) and delete the stack named “automate-pii-handling-data-pipeline” (or the stack named with your customized value during the CloudFormation stack creation step).
 
 ## Security
 
